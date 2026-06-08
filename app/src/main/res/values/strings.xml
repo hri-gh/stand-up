@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">StandUp</string>
+    <string name="timer_title">StandUp Timer</string>
+    <string name="start_timer">Start focus session</string>
+    <string name="stop_timer">Reset timer</string>
+    <string name="preset_30m">30 Minutes</string>
+    <string name="preset_45m">45 Minutes</string>
+    <string name="preset_1h">1 Hour</string>
+    <string name="custom">Custom</string>
+    <string name="minutes_label">minutes</string>
+    <string name="take_break_title">Time for a break!</string>
+    <string name="take_break_desc">Stand up, stretch, and move around to relax your muscles!</string>
+    <string name="working_status">Focus Session Active</string>
+    <string name="break_status">Resting / Stretching</string>
+    <string name="ready_status">Tap to start working</string>
+    <string name="started_time">Started at %1$s</string>
+    <string name="target_time">Alert at %1$s</string>
+    <string name="input_placeholder">Enter minutes (up to 180)</string>
+    <string name="dismiss">Got It</string>
+    <string name="vibrate">Vibration</string>
+    <string name="sound">Ringtone alert</string>
+    <string name="notification_channel_name">StandUp Alerts</string>
+    <string name="notification_channel_desc">Notifications when your focus session ends and it is time to stretch</string>
+</resources>

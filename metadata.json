@@ -1,0 +1,6 @@
+{
+  "name": "StandUp",
+  "description": "A clever, simple, non-repeating break timer with quick presets to remind you to stand up and stretch after active desk sessions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
