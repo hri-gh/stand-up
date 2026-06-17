@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Build
@@ -90,6 +91,16 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     private var autoStopJob: Job? = null
     private var clockTickerJob: Job? = null
 
+    private var isSyncing = false
+
+    private val prefChangeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "timer_status_persisted" || key == "timer_target_time_persisted") {
+            viewModelScope.launch {
+                syncTimerStateFromPreferences()
+            }
+        }
+    }
+
     init {
         val savedMins = prefs.getInt(KEY_MINUTES, 30)
         _presetMinutes.value = savedMins
@@ -102,6 +113,124 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         loadHistoryLogs()
         startClockTicker()
         createNotificationChannel()
+
+        prefs.registerOnSharedPreferenceChangeListener(prefChangeListener)
+        syncTimerStateFromPreferences()
+    }
+
+    private fun notifyWidgetUpdate() {
+        val intent = Intent(getApplication(), StandUpWidgetProvider::class.java).apply {
+            action = StandUpWidgetProvider.ACTION_WIDGET_UPDATE
+        }
+        getApplication<Application>().sendBroadcast(intent)
+    }
+
+    private fun scheduleSystemAlarm(triggerTimeMs: Long) {
+        val context = getApplication<Application>()
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+        val intent = Intent(context, StandUpWidgetProvider::class.java).apply {
+            action = StandUpWidgetProvider.ACTION_TIMER_EXPIRED
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            2002,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerTimeMs, pendingIntent)
+        } else {
+            alarmManager.setExact(android.app.AlarmManager.RTC_WAKEUP, triggerTimeMs, pendingIntent)
+        }
+    }
+
+    private fun cancelSystemAlarm() {
+        val context = getApplication<Application>()
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager ?: return
+        val intent = Intent(context, StandUpWidgetProvider::class.java).apply {
+            action = StandUpWidgetProvider.ACTION_TIMER_EXPIRED
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            2002,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
+    }
+
+    private fun syncTimerStateFromPreferences() {
+        if (isSyncing) return
+        isSyncing = true
+        try {
+            val statusStr = prefs.getString("timer_status_persisted", "READY") ?: "READY"
+            val targetTimeMs = prefs.getLong("timer_target_time_persisted", 0L)
+            val startTimeMs = prefs.getLong("timer_start_time_persisted", 0L)
+            val durationSecs = prefs.getLong("timer_duration_secs_persisted", 1800L)
+
+            when (statusStr) {
+                "FOCUSING" -> {
+                    val now = System.currentTimeMillis()
+                    if (now >= targetTimeMs) {
+                        if (_status.value != TimerStatus.BREAKING) {
+                            _secondsRemaining.value = 0
+                            _status.value = TimerStatus.BREAKING
+                            loadCompletedSessionsToday()
+                            loadHistoryLogs()
+                        }
+                    } else {
+                        val remainingMs = targetTimeMs - now
+                        val remainingSecs = (remainingMs + 500) / 1000
+                        if (_status.value != TimerStatus.FOCUSING || Math.abs(_secondsRemaining.value - remainingSecs) > 2) {
+                            _status.value = TimerStatus.FOCUSING
+                            _secondsRemaining.value = remainingSecs
+                            _totalDurationSeconds.value = durationSecs
+                            
+                            val sdf = SimpleDateFormat("h:mm a", Locale.getDefault())
+                            _startTimeFormatted.value = sdf.format(Date(startTimeMs))
+                            _targetTimeFormatted.value = sdf.format(Date(targetTimeMs))
+
+                            countDownTimer?.cancel()
+                            countDownTimer = object : CountDownTimer(remainingMs, 1000) {
+                                override fun onTick(millisUntilFinished: Long) {
+                                    _secondsRemaining.value = (millisUntilFinished + 500) / 1000
+                                }
+
+                                override fun onFinish() {
+                                    _secondsRemaining.value = 0
+                                    triggerAlarm()
+                                }
+                            }.start()
+                        }
+                    }
+                }
+                "BREAKING" -> {
+                    if (_status.value != TimerStatus.BREAKING) {
+                        _status.value = TimerStatus.BREAKING
+                        _secondsRemaining.value = 0
+                        countDownTimer?.cancel()
+                        countDownTimer = null
+                        loadCompletedSessionsToday()
+                        loadHistoryLogs()
+                    }
+                }
+                else -> { // READY
+                    if (_status.value != TimerStatus.READY) {
+                        countDownTimer?.cancel()
+                        countDownTimer = null
+                        stopAlarmSignalOnly()
+                        autoStopJob?.cancel()
+                        autoStopJob = null
+                        _status.value = TimerStatus.READY
+                        _secondsRemaining.value = 0
+                        _startTimeFormatted.value = null
+                        _targetTimeFormatted.value = null
+                    }
+                }
+            }
+        } finally {
+            isSyncing = false
+        }
     }
 
     private fun startClockTicker() {
@@ -204,6 +333,19 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
         _status.value = TimerStatus.FOCUSING
 
+        if (!isSyncing) {
+            val targetEpoch = System.currentTimeMillis() + durationMs
+            prefs.edit()
+                .putString("timer_status_persisted", "FOCUSING")
+                .putLong("timer_start_time_persisted", System.currentTimeMillis())
+                .putLong("timer_target_time_persisted", targetEpoch)
+                .putLong("timer_duration_secs_persisted", minutes * 60L)
+                .apply()
+            
+            scheduleSystemAlarm(targetEpoch)
+            notifyWidgetUpdate()
+        }
+
         countDownTimer?.cancel()
         countDownTimer = object : CountDownTimer(durationMs, 1000) {
             override fun onTick(millisUntilFinished: Long) {
@@ -227,6 +369,18 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
         _secondsRemaining.value = 0
         _startTimeFormatted.value = null
         _targetTimeFormatted.value = null
+
+        if (!isSyncing) {
+            prefs.edit()
+                .putString("timer_status_persisted", "READY")
+                .putLong("timer_start_time_persisted", 0L)
+                .putLong("timer_target_time_persisted", 0L)
+                .putLong("timer_duration_secs_persisted", 0L)
+                .apply()
+            
+            cancelSystemAlarm()
+            notifyWidgetUpdate()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -269,9 +423,16 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
     private fun triggerAlarm() {
         _status.value = TimerStatus.BREAKING
 
+        if (!isSyncing) {
+            prefs.edit()
+                .putString("timer_status_persisted", "BREAKING")
+                .apply()
+            notifyWidgetUpdate()
+        }
+
         // Create log record
         val startStr = _startTimeFormatted.value ?: ""
-        val nowStr = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
+        val nowStr = SimpleDateFormat("h:mm a", Locale.getDefault()) .format(Date())
         val durationMins = _presetMinutes.value
         val historyEntry = "$startStr - $nowStr ($durationMins mins Session)"
         addHistoryLog(historyEntry)
@@ -354,6 +515,7 @@ class TimerViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        prefs.unregisterOnSharedPreferenceChangeListener(prefChangeListener)
         countDownTimer?.cancel()
         clockTickerJob?.cancel()
         stopAlarmSignalOnly()
